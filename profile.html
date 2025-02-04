@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<style>
+	body {margin: 0; padding: 10px; background-color: #ffffff}
+	h1 {margin: 5px 0 0 0; font-size: 18px; font-weight: normal; text-align: center}
+	header {margin: -24px 0 5px 0; line-height: 24px}
+	button {font: 12px sans-serif; cursor: pointer}
+	p {margin: 5px 0 5px 0}
+	a {color: #0366d6}
+	#hl {position: absolute; display: none; overflow: hidden; white-space: nowrap; pointer-events: none; background-color: #ffffe0; outline: 1px solid #ffc000; height: 15px}
+	#hl span {padding: 0 3px 0 3px}
+	#status {overflow: hidden; white-space: nowrap}
+	#match {overflow: hidden; white-space: nowrap; display: none; float: right; text-align: right}
+	#reset {cursor: pointer}
+	#canvas {width: 100%; height: 1328px}
+</style>
+</head>
+<body style='font: 12px Verdana, sans-serif'>
+<h1>CPU profile</h1>
+<header style='text-align: left'><button id='reverse' title='Reverse'>&#x1f53b;</button>&nbsp;&nbsp;<button id='search' title='Search'>&#x1f50d;</button></header>
+<header style='text-align: right'>Produced by <a href='https://github.com/jvm-profiling-tools/async-profiler'>async-profiler</a></header>
+<canvas id='canvas'></canvas>
+<div id='hl'><span></span></div>
+<p id='match'>Matched: <span id='matchval'></span> <span id='reset' title='Clear'>&#x274c;</span></p>
+<p id='status'>&nbsp;</p>
+<script>
+	// Copyright 2020 Andrei Pangin
+	// Licensed under the Apache License, Version 2.0.
+	'use strict';
+	var root, rootLevel, px, pattern;
+	var reverse = false;
+	const levels = Array(83);
+	for (let h = 0; h < levels.length; h++) {
+		levels[h] = [];
+	}
+
+	const canvas = document.getElementById('canvas');
+	const c = canvas.getContext('2d');
+	const hl = document.getElementById('hl');
+	const status = document.getElementById('status');
+
+	const canvasWidth = canvas.offsetWidth;
+	const canvasHeight = canvas.offsetHeight;
+	canvas.style.width = canvasWidth + 'px';
+	canvas.width = canvasWidth * (devicePixelRatio || 1);
+	canvas.height = canvasHeight * (devicePixelRatio || 1);
+	if (devicePixelRatio) c.scale(devicePixelRatio, devicePixelRatio);
+	c.font = document.body.style.font;
+
+	const palette = [
+		[0xb2e1b2, 20, 20, 20],
+		[0x50e150, 30, 30, 30],
+		[0x50cccc, 30, 30, 30],
+		[0xe15a5a, 30, 40, 40],
+		[0xc8c83c, 30, 30, 10],
+		[0xe17d00, 30, 30,  0],
+		[0xcce880, 20, 20, 20],
+	];
+
+	function getColor(p) {
+		const v = Math.random();
+		return '#' + (p[0] + ((p[1] * v) << 16 | (p[2] * v) << 8 | (p[3] * v))).toString(16);
+	}
+
+	function f(level, left, width, type, title, inln, c1, int) {
+		levels[level].push({left: left, width: width, color: getColor(palette[type]), title: title,
+			details: (int ? ', int=' + int : '') + (c1 ? ', c1=' + c1 : '') + (inln ? ', inln=' + inln : '')
+		});
+	}
+
+	function samples(n) {
+		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
+	}
+
+	function pct(a, b) {
+		return a >= b ? '100' : (100 * a / b).toFixed(2);
+	}
+
+	function findFrame(frames, x) {
+		let left = 0;
+		let right = frames.length - 1;
+
+		while (left <= right) {
+			const mid = (left + right) >>> 1;
+			const f = frames[mid];
+
+			if (f.left > x) {
+				right = mid - 1;
+			} else if (f.left + f.width <= x) {
+				left = mid + 1;
+			} else {
+				return f;
+			}
+		}
+
+		if (frames[left] && (frames[left].left - x) * px < 0.5) return frames[left];
+		if (frames[right] && (x - (frames[right].left + frames[right].width)) * px < 0.5) return frames[right];
+
+		return null;
+	}
+
+	function search(r) {
+		if (r === true && (r = prompt('Enter regexp to search:', '')) === null) {
+			return;
+		}
+
+		pattern = r ? RegExp(r) : undefined;
+		const matched = render(root, rootLevel);
+		document.getElementById('matchval').textContent = pct(matched, root.width) + '%';
+		document.getElementById('match').style.display = r ? 'inherit' : 'none';
+	}
+
+	function render(newRoot, newLevel) {
+		if (root) {
+			c.fillStyle = '#ffffff';
+			c.fillRect(0, 0, canvasWidth, canvasHeight);
+		}
+
+		root = newRoot || levels[0][0];
+		rootLevel = newLevel || 0;
+		px = canvasWidth / root.width;
+
+		const x0 = root.left;
+		const x1 = x0 + root.width;
+		const marked = [];
+
+		function mark(f) {
+			return marked[f.left] >= f.width || (marked[f.left] = f.width);
+		}
+
+		function totalMarked() {
+			let total = 0;
+			let left = 0;
+			Object.keys(marked).sort(function(a, b) { return a - b; }).forEach(function(x) {
+				if (+x >= left) {
+					total += marked[x];
+					left = +x + marked[x];
+				}
+			});
+			return total;
+		}
+
+		function drawFrame(f, y, alpha) {
+			if (f.left < x1 && f.left + f.width > x0) {
+				c.fillStyle = pattern && f.title.match(pattern) && mark(f) ? '#ee00ee' : f.color;
+				c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+
+				if (f.width * px >= 21) {
+					const chars = Math.floor(f.width * px / 7);
+					const title = f.title.length <= chars ? f.title : f.title.substring(0, chars - 2) + '..';
+					c.fillStyle = '#000000';
+					c.fillText(title, Math.max(f.left - x0, 0) * px + 3, y + 12, f.width * px - 6);
+				}
+
+				if (alpha) {
+					c.fillStyle = 'rgba(255, 255, 255, 0.5)';
+					c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+				}
+			}
+		}
+
+		for (let h = 0; h < levels.length; h++) {
+			const y = reverse ? h * 16 : canvasHeight - (h + 1) * 16;
+			const frames = levels[h];
+			for (let i = 0; i < frames.length; i++) {
+				drawFrame(frames[i], y, h < rootLevel);
+			}
+		}
+
+		return totalMarked();
+	}
+
+	canvas.onmousemove = function() {
+		const h = Math.floor((reverse ? event.offsetY : (canvasHeight - event.offsetY)) / 16);
+		if (h >= 0 && h < levels.length) {
+			const f = findFrame(levels[h], event.offsetX / px + root.left);
+			if (f) {
+				if (f != root) getSelection().removeAllRanges();
+				hl.style.left = (Math.max(f.left - root.left, 0) * px + canvas.offsetLeft) + 'px';
+				hl.style.width = (Math.min(f.width, root.width) * px) + 'px';
+				hl.style.top = ((reverse ? h * 16 : canvasHeight - (h + 1) * 16) + canvas.offsetTop) + 'px';
+				hl.firstChild.textContent = f.title;
+				hl.style.display = 'block';
+				canvas.title = f.title + '\n(' + samples(f.width) + f.details + ', ' + pct(f.width, levels[0][0].width) + '%)';
+				canvas.style.cursor = 'pointer';
+				canvas.onclick = function() {
+					if (f != root) {
+						render(f, h);
+						canvas.onmousemove();
+					}
+				};
+				status.textContent = 'Function: ' + canvas.title;
+				return;
+			}
+		}
+		canvas.onmouseout();
+	}
+
+	canvas.onmouseout = function() {
+		hl.style.display = 'none';
+		status.textContent = '\xa0';
+		canvas.title = '';
+		canvas.style.cursor = '';
+		canvas.onclick = '';
+	}
+
+	canvas.ondblclick = function() {
+		getSelection().selectAllChildren(hl);
+	}
+
+	document.getElementById('reverse').onclick = function() {
+		reverse = !reverse;
+		render();
+	}
+
+	document.getElementById('search').onclick = function() {
+		search(true);
+	}
+
+	document.getElementById('reset').onclick = function() {
+		search(false);
+	}
+
+	window.onkeydown = function() {
+		if (event.ctrlKey && event.keyCode === 70) {
+			event.preventDefault();
+			search(true);
+		} else if (event.keyCode === 27) {
+			search(false);
+		}
+	}
+
+f(0,0,8,3,'all')
+f(1,0,7,3,'/usr/lib/x86_64-linux-gnu/libc.so.6')
+f(2,1,6,3,'thread_native_entry(Thread*)')
+f(3,1,6,4,'Thread::call_run()')
+f(4,1,2,4,'ConcurrentGCThread::run()')
+f(5,1,2,4,'G1ConcurrentRefineThread::run_service()')
+f(6,1,1,4,'ConcurrentGCThread::should_terminate() const')
+f(6,2,1,4,'G1PrimaryConcurrentRefineThread::do_refinement_step()')
+f(7,2,1,4,'G1ConcurrentRefine::adjust_threads_periodically()')
+f(8,2,1,4,'G1Policy::revise_young_list_target_length(unsigned long)')
+f(4,3,3,4,'JavaThread::thread_main_inner() [clone .part.0]')
+f(5,3,3,4,'CompileBroker::compiler_thread_loop()')
+f(6,3,3,4,'CompileBroker::invoke_compiler_on_method(CompileTask*)')
+f(7,3,1,4,'C2Compiler::compile_method(ciEnv*, ciMethod*, int, bool, DirectiveSet*)')
+f(8,3,1,4,'Compile::Compile(ciEnv*, ciMethod*, int, Options, DirectiveSet*)')
+f(9,3,1,4,'Compile::Code_Gen()')
+f(10,3,1,4,'PhaseChaitin::Register_Allocate()')
+f(11,3,1,4,'PhaseChaitin::Split(unsigned int, ResourceArea*)')
+f(7,4,2,4,'Compiler::compile_method(ciEnv*, ciMethod*, int, bool, DirectiveSet*)')
+f(8,4,2,4,'Compilation::Compilation(AbstractCompiler*, ciEnv*, ciMethod*, int, BufferBlob*, bool, DirectiveSet*)')
+f(9,4,2,4,'Compilation::compile_method()')
+f(10,4,2,4,'Compilation::compile_java_method()')
+f(11,4,2,4,'Compilation::emit_code_body()')
+f(12,4,2,4,'LIR_Assembler::emit_code(BlockList*)')
+f(13,4,2,4,'LIR_Assembler::emit_lir_list(LIR_List*)')
+f(14,4,1,4,'C1_MacroAssembler::build_frame(int, int)')
+f(14,5,1,4,'LIR_Assembler::emit_call(LIR_OpJavaCall*)')
+f(15,5,1,4,'LIR_Assembler::call(LIR_OpJavaCall*, relocInfo::relocType)')
+f(16,5,1,4,'LIR_Assembler::add_call_info(int, CodeEmitInfo*)')
+f(17,5,1,4,'LIR_Assembler::record_non_safepoint_debug_info()')
+f(18,5,1,4,'DebugInformationRecorder::add_non_safepoint(int)')
+f(4,6,1,4,'WatcherThread::run()')
+f(5,6,1,4,'PeriodicTask::real_time_tick(int)')
+f(6,6,1,4,'Mutex::lock_without_safepoint_check()')
+f(7,6,1,3,'/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2')
+f(1,7,1,1,'java/lang/Thread.run')
+f(2,7,1,1,'java/lang/Thread.runWith')
+f(3,7,1,1,'org/apache/tomcat/util/threads/TaskThread$WrappingRunnable.run')
+f(4,7,1,1,'org/apache/tomcat/util/threads/ThreadPoolExecutor$Worker.run')
+f(5,7,1,1,'org/apache/tomcat/util/threads/ThreadPoolExecutor.runWorker')
+f(6,7,1,1,'org/apache/tomcat/util/net/SocketProcessorBase.run')
+f(7,7,1,1,'org/apache/tomcat/util/net/NioEndpoint$SocketProcessor.doRun')
+f(8,7,1,1,'org/apache/coyote/AbstractProtocol$ConnectionHandler.process')
+f(9,7,1,1,'org/apache/coyote/AbstractProcessorLight.process')
+f(10,7,1,1,'org/apache/coyote/http11/Http11Processor.service')
+f(11,7,1,1,'org/apache/catalina/connector/CoyoteAdapter.service')
+f(12,7,1,1,'org/apache/catalina/core/StandardEngineValve.invoke')
+f(13,7,1,1,'org/apache/catalina/valves/ErrorReportValve.invoke')
+f(14,7,1,1,'org/apache/catalina/core/StandardHostValve.invoke')
+f(15,7,1,1,'org/apache/catalina/authenticator/AuthenticatorBase.invoke')
+f(16,7,1,1,'org/apache/catalina/core/StandardContextValve.invoke')
+f(17,7,1,1,'org/apache/catalina/core/StandardWrapperValve.invoke')
+f(18,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(19,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(20,7,1,1,'org/springframework/web/filter/OncePerRequestFilter.doFilter')
+f(21,7,1,1,'org/springframework/web/filter/CharacterEncodingFilter.doFilterInternal')
+f(22,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(23,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(24,7,1,1,'org/springframework/web/filter/OncePerRequestFilter.doFilter')
+f(25,7,1,1,'org/springframework/web/filter/ServerHttpObservationFilter.doFilterInternal')
+f(26,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(27,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(28,7,1,1,'org/springframework/web/filter/OncePerRequestFilter.doFilter')
+f(29,7,1,1,'org/springframework/web/filter/FormContentFilter.doFilterInternal')
+f(30,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(31,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(32,7,1,1,'org/springframework/web/filter/OncePerRequestFilter.doFilter')
+f(33,7,1,1,'org/springframework/web/filter/RequestContextFilter.doFilterInternal')
+f(34,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(35,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(36,7,1,1,'org/apache/tomcat/websocket/server/WsFilter.doFilter')
+f(37,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(38,7,1,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(39,7,1,1,'jakarta/servlet/http/HttpServlet.service')
+f(40,7,1,1,'org/springframework/web/servlet/FrameworkServlet.service')
+f(41,7,1,1,'jakarta/servlet/http/HttpServlet.service')
+f(42,7,1,1,'org/springframework/web/servlet/FrameworkServlet.doGet')
+f(43,7,1,1,'org/springframework/web/servlet/FrameworkServlet.processRequest')
+f(44,7,1,1,'org/springframework/web/servlet/DispatcherServlet.doService')
+f(45,7,1,1,'org/springframework/web/servlet/DispatcherServlet.doDispatch')
+f(46,7,1,1,'org/springframework/web/servlet/mvc/method/AbstractHandlerMethodAdapter.handle')
+f(47,7,1,1,'org/springframework/web/servlet/mvc/method/annotation/RequestMappingHandlerAdapter.handleInternal')
+f(48,7,1,1,'org/springframework/web/servlet/mvc/method/annotation/RequestMappingHandlerAdapter.invokeHandlerMethod')
+f(49,7,1,1,'org/springframework/web/servlet/mvc/method/annotation/ServletInvocableHandlerMethod.invokeAndHandle')
+f(50,7,1,1,'org/springframework/web/method/support/InvocableHandlerMethod.invokeForRequest')
+f(51,7,1,1,'org/springframework/web/method/support/InvocableHandlerMethod.doInvoke')
+f(52,7,1,1,'java/lang/reflect/Method.invoke')
+f(53,7,1,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invoke')
+f(54,7,1,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invokeImpl')
+f(55,7,1,1,'java/lang/invoke/LambdaForm$MH.0x00007fa65c125800.invokeExact_MT')
+f(56,7,1,1,'java/lang/invoke/LambdaForm$MH.0x00007fa65c3a1000.invoke')
+f(57,7,1,1,'java/lang/invoke/DirectMethodHandle$Holder.invokeSpecial')
+f(58,7,1,1,'org/springframework/boot/actuate/endpoint/web/servlet/AbstractWebMvcEndpointHandlerMapping$OperationHandler.handle')
+f(59,7,1,1,'org/springframework/boot/actuate/endpoint/web/servlet/AbstractWebMvcEndpointHandlerMapping$ServletWebOperationAdapter.handle')
+f(60,7,1,1,'org/springframework/boot/actuate/endpoint/annotation/AbstractDiscoveredOperation.invoke')
+f(61,7,1,1,'org/springframework/boot/actuate/endpoint/invoke/reflect/ReflectiveOperationInvoker.invoke')
+f(62,7,1,1,'org/springframework/util/ReflectionUtils.invokeMethod')
+f(63,7,1,1,'java/lang/reflect/Method.invoke')
+f(64,7,1,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invoke')
+f(65,7,1,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invokeImpl')
+f(66,7,1,1,'java/lang/invoke/LambdaForm$MH.0x00007fa65c125800.invokeExact_MT')
+f(67,7,1,1,'java/lang/invoke/LambdaForm$MH.0x00007fa65c42c400.invoke')
+f(68,7,1,1,'java/lang/invoke/LambdaForm$DMH.0x00007fa65c22c400.invokeVirtual')
+f(69,7,1,1,'org/springframework/boot/actuate/metrics/export/prometheus/PrometheusScrapeEndpoint.scrape')
+f(70,7,1,1,'org/springframework/boot/actuate/metrics/export/prometheus/PrometheusOutputFormat$2.write')
+f(71,7,1,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.write')
+f(72,7,1,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeCounter')
+f(73,7,1,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeMetadata')
+f(74,7,1,1,'io/prometheus/metrics/expositionformats/TextFormatUtil.writeEscapedLabelValue')
+f(75,7,1,1,'java/io/Writer.append')
+f(76,7,1,1,'java/io/OutputStreamWriter.write')
+f(77,7,1,1,'sun/nio/cs/StreamEncoder.write')
+f(78,7,1,1,'sun/nio/cs/StreamEncoder.write')
+f(79,7,1,2,'jdk/internal/misc/InternalLock.unlock',1,0,0)
+f(80,7,1,2,'java/util/concurrent/locks/ReentrantLock.unlock',1,0,0)
+f(81,7,1,2,'java/util/concurrent/locks/AbstractQueuedSynchronizer.release',1,0,0)
+f(82,7,1,2,'java/util/concurrent/locks/AbstractQueuedSynchronizer.signalNext',1,0,0)
+
+search();
+</script></body></html>
