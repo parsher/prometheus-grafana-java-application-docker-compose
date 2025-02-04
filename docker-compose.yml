@@ -33,12 +33,6 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
 
-  kubectl-prof-setup:
-    image: ubuntu:latest
-    volumes:
-      - ./setup-kubectl-prof.sh:/setup-kubectl-prof.sh
-    command: ["/bin/bash", "/setup-kubectl-prof.sh"]
-
 volumes:
   prometheus_data:
   grafana_data:
