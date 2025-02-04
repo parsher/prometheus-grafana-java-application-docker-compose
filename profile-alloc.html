@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<style>
+	body {margin: 0; padding: 10px; background-color: #ffffff}
+	h1 {margin: 5px 0 0 0; font-size: 18px; font-weight: normal; text-align: center}
+	header {margin: -24px 0 5px 0; line-height: 24px}
+	button {font: 12px sans-serif; cursor: pointer}
+	p {margin: 5px 0 5px 0}
+	a {color: #0366d6}
+	#hl {position: absolute; display: none; overflow: hidden; white-space: nowrap; pointer-events: none; background-color: #ffffe0; outline: 1px solid #ffc000; height: 15px}
+	#hl span {padding: 0 3px 0 3px}
+	#status {overflow: hidden; white-space: nowrap}
+	#match {overflow: hidden; white-space: nowrap; display: none; float: right; text-align: right}
+	#reset {cursor: pointer}
+	#canvas {width: 100%; height: 1664px}
+</style>
+</head>
+<body style='font: 12px Verdana, sans-serif'>
+<h1>Allocation profile</h1>
+<header style='text-align: left'><button id='reverse' title='Reverse'>&#x1f53b;</button>&nbsp;&nbsp;<button id='search' title='Search'>&#x1f50d;</button></header>
+<header style='text-align: right'>Produced by <a href='https://github.com/jvm-profiling-tools/async-profiler'>async-profiler</a></header>
+<canvas id='canvas'></canvas>
+<div id='hl'><span></span></div>
+<p id='match'>Matched: <span id='matchval'></span> <span id='reset' title='Clear'>&#x274c;</span></p>
+<p id='status'>&nbsp;</p>
+<script>
+	// Copyright 2020 Andrei Pangin
+	// Licensed under the Apache License, Version 2.0.
+	'use strict';
+	var root, rootLevel, px, pattern;
+	var reverse = false;
+	const levels = Array(104);
+	for (let h = 0; h < levels.length; h++) {
+		levels[h] = [];
+	}
+
+	const canvas = document.getElementById('canvas');
+	const c = canvas.getContext('2d');
+	const hl = document.getElementById('hl');
+	const status = document.getElementById('status');
+
+	const canvasWidth = canvas.offsetWidth;
+	const canvasHeight = canvas.offsetHeight;
+	canvas.style.width = canvasWidth + 'px';
+	canvas.width = canvasWidth * (devicePixelRatio || 1);
+	canvas.height = canvasHeight * (devicePixelRatio || 1);
+	if (devicePixelRatio) c.scale(devicePixelRatio, devicePixelRatio);
+	c.font = document.body.style.font;
+
+	const palette = [
+		[0xb2e1b2, 20, 20, 20],
+		[0x50e150, 30, 30, 30],
+		[0x50cccc, 30, 30, 30],
+		[0xe15a5a, 30, 40, 40],
+		[0xc8c83c, 30, 30, 10],
+		[0xe17d00, 30, 30,  0],
+		[0xcce880, 20, 20, 20],
+	];
+
+	function getColor(p) {
+		const v = Math.random();
+		return '#' + (p[0] + ((p[1] * v) << 16 | (p[2] * v) << 8 | (p[3] * v))).toString(16);
+	}
+
+	function f(level, left, width, type, title, inln, c1, int) {
+		levels[level].push({left: left, width: width, color: getColor(palette[type]), title: title,
+			details: (int ? ', int=' + int : '') + (c1 ? ', c1=' + c1 : '') + (inln ? ', inln=' + inln : '')
+		});
+	}
+
+	function samples(n) {
+		return n === 1 ? '1 sample' : n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' samples';
+	}
+
+	function pct(a, b) {
+		return a >= b ? '100' : (100 * a / b).toFixed(2);
+	}
+
+	function findFrame(frames, x) {
+		let left = 0;
+		let right = frames.length - 1;
+
+		while (left <= right) {
+			const mid = (left + right) >>> 1;
+			const f = frames[mid];
+
+			if (f.left > x) {
+				right = mid - 1;
+			} else if (f.left + f.width <= x) {
+				left = mid + 1;
+			} else {
+				return f;
+			}
+		}
+
+		if (frames[left] && (frames[left].left - x) * px < 0.5) return frames[left];
+		if (frames[right] && (x - (frames[right].left + frames[right].width)) * px < 0.5) return frames[right];
+
+		return null;
+	}
+
+	function search(r) {
+		if (r === true && (r = prompt('Enter regexp to search:', '')) === null) {
+			return;
+		}
+
+		pattern = r ? RegExp(r) : undefined;
+		const matched = render(root, rootLevel);
+		document.getElementById('matchval').textContent = pct(matched, root.width) + '%';
+		document.getElementById('match').style.display = r ? 'inherit' : 'none';
+	}
+
+	function render(newRoot, newLevel) {
+		if (root) {
+			c.fillStyle = '#ffffff';
+			c.fillRect(0, 0, canvasWidth, canvasHeight);
+		}
+
+		root = newRoot || levels[0][0];
+		rootLevel = newLevel || 0;
+		px = canvasWidth / root.width;
+
+		const x0 = root.left;
+		const x1 = x0 + root.width;
+		const marked = [];
+
+		function mark(f) {
+			return marked[f.left] >= f.width || (marked[f.left] = f.width);
+		}
+
+		function totalMarked() {
+			let total = 0;
+			let left = 0;
+			Object.keys(marked).sort(function(a, b) { return a - b; }).forEach(function(x) {
+				if (+x >= left) {
+					total += marked[x];
+					left = +x + marked[x];
+				}
+			});
+			return total;
+		}
+
+		function drawFrame(f, y, alpha) {
+			if (f.left < x1 && f.left + f.width > x0) {
+				c.fillStyle = pattern && f.title.match(pattern) && mark(f) ? '#ee00ee' : f.color;
+				c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+
+				if (f.width * px >= 21) {
+					const chars = Math.floor(f.width * px / 7);
+					const title = f.title.length <= chars ? f.title : f.title.substring(0, chars - 2) + '..';
+					c.fillStyle = '#000000';
+					c.fillText(title, Math.max(f.left - x0, 0) * px + 3, y + 12, f.width * px - 6);
+				}
+
+				if (alpha) {
+					c.fillStyle = 'rgba(255, 255, 255, 0.5)';
+					c.fillRect((f.left - x0) * px, y, f.width * px, 15);
+				}
+			}
+		}
+
+		for (let h = 0; h < levels.length; h++) {
+			const y = reverse ? h * 16 : canvasHeight - (h + 1) * 16;
+			const frames = levels[h];
+			for (let i = 0; i < frames.length; i++) {
+				drawFrame(frames[i], y, h < rootLevel);
+			}
+		}
+
+		return totalMarked();
+	}
+
+	canvas.onmousemove = function() {
+		const h = Math.floor((reverse ? event.offsetY : (canvasHeight - event.offsetY)) / 16);
+		if (h >= 0 && h < levels.length) {
+			const f = findFrame(levels[h], event.offsetX / px + root.left);
+			if (f) {
+				if (f != root) getSelection().removeAllRanges();
+				hl.style.left = (Math.max(f.left - root.left, 0) * px + canvas.offsetLeft) + 'px';
+				hl.style.width = (Math.min(f.width, root.width) * px) + 'px';
+				hl.style.top = ((reverse ? h * 16 : canvasHeight - (h + 1) * 16) + canvas.offsetTop) + 'px';
+				hl.firstChild.textContent = f.title;
+				hl.style.display = 'block';
+				canvas.title = f.title + '\n(' + samples(f.width) + f.details + ', ' + pct(f.width, levels[0][0].width) + '%)';
+				canvas.style.cursor = 'pointer';
+				canvas.onclick = function() {
+					if (f != root) {
+						render(f, h);
+						canvas.onmousemove();
+					}
+				};
+				status.textContent = 'Function: ' + canvas.title;
+				return;
+			}
+		}
+		canvas.onmouseout();
+	}
+
+	canvas.onmouseout = function() {
+		hl.style.display = 'none';
+		status.textContent = '\xa0';
+		canvas.title = '';
+		canvas.style.cursor = '';
+		canvas.onclick = '';
+	}
+
+	canvas.ondblclick = function() {
+		getSelection().selectAllChildren(hl);
+	}
+
+	document.getElementById('reverse').onclick = function() {
+		reverse = !reverse;
+		render();
+	}
+
+	document.getElementById('search').onclick = function() {
+		search(true);
+	}
+
+	document.getElementById('reset').onclick = function() {
+		search(false);
+	}
+
+	window.onkeydown = function() {
+		if (event.ctrlKey && event.keyCode === 70) {
+			event.preventDefault();
+			search(true);
+		} else if (event.keyCode === 27) {
+			search(false);
+		}
+	}
+
+f(0,0,38,3,'all')
+f(1,0,38,1,'java/lang/Thread.run')
+f(2,0,38,1,'java/lang/Thread.runWith')
+f(3,0,38,1,'org/apache/tomcat/util/threads/TaskThread$WrappingRunnable.run')
+f(4,0,38,1,'org/apache/tomcat/util/threads/ThreadPoolExecutor$Worker.run')
+f(5,0,38,1,'org/apache/tomcat/util/threads/ThreadPoolExecutor.runWorker')
+f(6,0,38,1,'org/apache/tomcat/util/net/SocketProcessorBase.run')
+f(7,0,38,1,'org/apache/tomcat/util/net/NioEndpoint$SocketProcessor.doRun')
+f(8,0,38,1,'org/apache/coyote/AbstractProtocol$ConnectionHandler.process')
+f(9,0,38,1,'org/apache/coyote/AbstractProcessorLight.process')
+f(10,0,38,1,'org/apache/coyote/http11/Http11Processor.service')
+f(11,0,38,1,'org/apache/catalina/connector/CoyoteAdapter.service')
+f(12,0,38,1,'org/apache/catalina/core/StandardEngineValve.invoke')
+f(13,0,38,1,'org/apache/catalina/valves/ErrorReportValve.invoke')
+f(14,0,38,1,'org/apache/catalina/core/StandardHostValve.invoke')
+f(15,0,38,1,'org/apache/catalina/authenticator/AuthenticatorBase.invoke')
+f(16,0,38,1,'org/apache/catalina/core/StandardContextValve.invoke')
+f(17,0,38,1,'org/apache/catalina/core/StandardWrapperValve.invoke')
+f(18,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(19,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(20,0,38,1,'org/springframework/web/filter/OncePerRequestFilter.doFilter')
+f(21,0,38,1,'org/springframework/web/filter/CharacterEncodingFilter.doFilterInternal')
+f(22,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(23,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(24,0,38,1,'org/springframework/web/filter/OncePerRequestFilter.doFilter')
+f(25,0,38,1,'org/springframework/web/filter/ServerHttpObservationFilter.doFilterInternal')
+f(26,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(27,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(28,0,38,1,'org/springframework/web/filter/OncePerRequestFilter.doFilter')
+f(29,0,38,1,'org/springframework/web/filter/FormContentFilter.doFilterInternal')
+f(30,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(31,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(32,0,38,1,'org/springframework/web/filter/OncePerRequestFilter.doFilter')
+f(33,0,38,1,'org/springframework/web/filter/RequestContextFilter.doFilterInternal')
+f(34,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(35,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(36,0,38,1,'org/apache/tomcat/websocket/server/WsFilter.doFilter')
+f(37,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.doFilter')
+f(38,0,38,1,'org/apache/catalina/core/ApplicationFilterChain.internalDoFilter')
+f(39,0,38,1,'jakarta/servlet/http/HttpServlet.service')
+f(40,0,38,1,'org/springframework/web/servlet/FrameworkServlet.service')
+f(41,0,38,1,'jakarta/servlet/http/HttpServlet.service')
+f(42,0,38,1,'org/springframework/web/servlet/FrameworkServlet.doGet')
+f(43,0,38,1,'org/springframework/web/servlet/FrameworkServlet.processRequest')
+f(44,0,38,1,'org/springframework/web/servlet/DispatcherServlet.doService')
+f(45,0,38,1,'org/springframework/web/servlet/DispatcherServlet.doDispatch')
+f(46,0,38,1,'org/springframework/web/servlet/mvc/method/AbstractHandlerMethodAdapter.handle')
+f(47,0,38,1,'org/springframework/web/servlet/mvc/method/annotation/RequestMappingHandlerAdapter.handleInternal')
+f(48,0,38,1,'org/springframework/web/servlet/mvc/method/annotation/RequestMappingHandlerAdapter.invokeHandlerMethod')
+f(49,0,38,1,'org/springframework/web/servlet/mvc/method/annotation/ServletInvocableHandlerMethod.invokeAndHandle')
+f(50,0,1,1,'org/springframework/web/method/support/HandlerMethodReturnValueHandlerComposite.handleReturnValue')
+f(51,0,1,1,'org/springframework/web/servlet/mvc/method/annotation/HttpEntityMethodProcessor.handleReturnValue')
+f(52,0,1,1,'org/springframework/web/servlet/mvc/method/annotation/AbstractMessageConverterMethodProcessor.writeWithMessageConverters')
+f(53,0,1,1,'org/springframework/http/converter/AbstractHttpMessageConverter.write')
+f(54,0,1,1,'org/springframework/http/converter/ByteArrayHttpMessageConverter.writeInternal')
+f(55,0,1,1,'org/springframework/http/converter/ByteArrayHttpMessageConverter.writeInternal')
+f(56,0,1,1,'org/springframework/util/StreamUtils.copy')
+f(57,0,1,1,'java/io/OutputStream.write')
+f(58,0,1,1,'org/springframework/web/context/request/async/StandardServletAsyncWebRequest$LifecycleServletOutputStream.write')
+f(59,0,1,1,'org/apache/catalina/connector/CoyoteOutputStream.write')
+f(60,0,1,1,'org/apache/catalina/connector/OutputBuffer.write')
+f(61,0,1,1,'org/apache/catalina/connector/OutputBuffer.writeBytes')
+f(62,0,1,1,'org/apache/catalina/connector/OutputBuffer.append')
+f(63,0,1,1,'org/apache/catalina/connector/OutputBuffer.appendByteArray')
+f(64,0,1,1,'org/apache/catalina/connector/OutputBuffer.realWriteBytes')
+f(65,0,1,1,'org/apache/coyote/Response.doWrite')
+f(66,0,1,1,'org/apache/coyote/http11/Http11OutputBuffer.doWrite')
+f(67,0,1,1,'org/apache/coyote/Response.action')
+f(68,0,1,1,'org/apache/coyote/AbstractProcessor.action')
+f(69,0,1,1,'org/apache/coyote/http11/Http11Processor.prepareResponse')
+f(70,0,1,1,'org/apache/coyote/http11/Http11Processor.writeHeaders')
+f(71,0,1,1,'org/apache/coyote/http11/Http11OutputBuffer.sendHeader')
+f(72,0,1,1,'org/apache/coyote/http11/Http11OutputBuffer.write')
+f(73,0,1,1,'org/apache/tomcat/util/buf/MessageBytes.toBytes')
+f(74,0,1,1,'java/lang/String.toCharArray')
+f(75,0,1,1,'java/lang/StringLatin1.toChars')
+f(76,0,1,2,'char[]')
+f(50,1,37,1,'org/springframework/web/method/support/InvocableHandlerMethod.invokeForRequest')
+f(51,1,37,1,'org/springframework/web/method/support/InvocableHandlerMethod.doInvoke')
+f(52,1,37,1,'java/lang/reflect/Method.invoke')
+f(53,1,37,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invoke')
+f(54,1,37,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invokeImpl')
+f(55,1,37,1,'java/lang/invoke/LambdaForm$MH.0x00007f2d8c121c00.invokeExact_MT')
+f(56,1,37,1,'java/lang/invoke/LambdaForm$MH.0x00007f2d8c3c0800.invoke')
+f(57,1,37,1,'java/lang/invoke/DirectMethodHandle$Holder.invokeSpecial')
+f(58,1,37,1,'org/springframework/boot/actuate/endpoint/web/servlet/AbstractWebMvcEndpointHandlerMapping$OperationHandler.handle')
+f(59,1,37,1,'org/springframework/boot/actuate/endpoint/web/servlet/AbstractWebMvcEndpointHandlerMapping$ServletWebOperationAdapter.handle')
+f(60,1,37,1,'org/springframework/boot/actuate/endpoint/annotation/AbstractDiscoveredOperation.invoke')
+f(61,1,37,1,'org/springframework/boot/actuate/endpoint/invoke/reflect/ReflectiveOperationInvoker.invoke')
+f(62,1,37,1,'org/springframework/util/ReflectionUtils.invokeMethod')
+f(63,1,37,1,'java/lang/reflect/Method.invoke')
+f(64,1,37,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invoke')
+f(65,1,37,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invokeImpl')
+f(66,1,37,1,'java/lang/invoke/LambdaForm$MH.0x00007f2d8c121c00.invokeExact_MT')
+f(67,1,37,1,'java/lang/invoke/LambdaForm$MH.0x00007f2d8c346400.invoke')
+f(68,1,37,1,'java/lang/invoke/LambdaForm$DMH.0x00007f2d8c22dc00.invokeVirtual')
+f(69,1,37,1,'org/springframework/boot/actuate/metrics/export/prometheus/PrometheusScrapeEndpoint.scrape')
+f(70,1,21,1,'io/prometheus/metrics/model/registry/PrometheusRegistry.scrape')
+f(71,1,21,1,'io/prometheus/metrics/model/registry/PrometheusRegistry.scrape')
+f(72,1,21,1,'io/micrometer/prometheusmetrics/MicrometerCollector.collect')
+f(73,1,19,1,'io/micrometer/prometheusmetrics/PrometheusMeterRegistry$$Lambda.0x00007f2d8c4a6138.samples')
+f(74,1,19,1,'io/micrometer/prometheusmetrics/PrometheusMeterRegistry.lambda$newGauge$12')
+f(75,1,18,1,'io/micrometer/core/instrument/internal/DefaultGauge.value')
+f(76,1,1,1,'io/micrometer/core/instrument/binder/jvm/JvmThreadMetrics$$Lambda.0x00007f2d8c4b9510.applyAsDouble')
+f(77,1,1,1,'io/micrometer/core/instrument/binder/jvm/JvmThreadMetrics.lambda$bindTo$0')
+f(78,1,1,1,'io/micrometer/core/instrument/binder/jvm/JvmThreadMetrics.getThreadStateCount')
+f(79,1,1,1,'sun/management/ThreadImpl.getThreadInfo')
+f(80,1,1,1,'sun/management/ThreadImpl.getThreadInfo')
+f(81,1,1,1,'sun/management/ThreadImpl.getThreadInfo1')
+f(82,1,1,2,'java.lang.management.ThreadInfo')
+f(76,2,8,1,'io/micrometer/core/instrument/binder/system/ProcessorMetrics$$Lambda.0x00007f2d8c4bbcd8.applyAsDouble')
+f(77,2,8,1,'io/micrometer/core/instrument/binder/system/ProcessorMetrics.lambda$bindTo$0')
+f(78,2,8,1,'io/micrometer/core/instrument/binder/system/ProcessorMetrics.invoke')
+f(79,2,8,1,'java/lang/reflect/Method.invoke')
+f(80,2,8,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invoke')
+f(81,2,8,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invokeImpl')
+f(82,2,8,1,'java/lang/invoke/Invokers$Holder.invokeExact_MT')
+f(83,2,8,1,'java/lang/invoke/LambdaForm$MH.0x00007f2d8c540800.invoke')
+f(84,2,8,1,'java/lang/invoke/LambdaForm$DMH.0x00007f2d8c4bc800.invokeInterface')
+f(85,2,8,1,'com/sun/management/internal/OperatingSystemImpl.getCpuLoad')
+f(86,2,8,1,'com/sun/management/internal/OperatingSystemImpl$ContainerCpuTicks.getContainerCpuLoad')
+f(87,2,4,1,'com/sun/management/internal/OperatingSystemImpl.isCpuSetSameAsHostCpuSet')
+f(88,2,4,1,'jdk/internal/platform/CgroupMetrics.getCpuSetCpus')
+f(89,2,4,1,'jdk/internal/platform/cgroupv1/CgroupV1Subsystem.getCpuSetCpus')
+f(90,2,4,1,'jdk/internal/platform/CgroupSubsystemController.getStringValue')
+f(91,2,4,1,'jdk/internal/platform/CgroupUtil.readStringValue')
+f(92,2,4,1,'java/security/AccessController.doPrivileged')
+f(93,2,4,1,'java/security/AccessController.executePrivileged')
+f(94,2,4,1,'jdk/internal/platform/CgroupUtil$$Lambda.0x00007f2d8c3f9100.run')
+f(95,2,4,1,'jdk/internal/platform/CgroupUtil.lambda$readStringValue$1')
+f(96,2,4,1,'java/nio/file/Files.newBufferedReader')
+f(97,2,4,1,'java/nio/file/Files.newBufferedReader')
+f(98,2,1,1,'java/io/BufferedReader.<init>')
+f(99,2,1,1,'java/io/BufferedReader.<init>')
+f(100,2,1,5,'char[]')
+f(98,3,3,1,'java/io/InputStreamReader.<init>')
+f(99,3,3,1,'sun/nio/cs/StreamDecoder.forInputStreamReader')
+f(100,3,3,1,'sun/nio/cs/StreamDecoder.<init>')
+f(101,3,3,1,'java/nio/ByteBuffer.allocate')
+f(102,3,2,2,'byte[]')
+f(102,5,1,5,'byte[]')
+f(87,6,4,1,'jdk/internal/platform/CgroupMetrics.getCpuShares')
+f(88,6,4,1,'jdk/internal/platform/cgroupv1/CgroupV1Subsystem.getCpuShares')
+f(89,6,4,1,'jdk/internal/platform/cgroupv1/CgroupV1Subsystem.getLongValue')
+f(90,6,4,1,'jdk/internal/platform/CgroupSubsystemController.getLongValue')
+f(91,6,4,1,'jdk/internal/platform/CgroupSubsystemController.getStringValue')
+f(92,6,4,1,'jdk/internal/platform/CgroupUtil.readStringValue')
+f(93,6,4,1,'java/security/AccessController.doPrivileged')
+f(94,6,4,1,'java/security/AccessController.executePrivileged')
+f(95,6,4,1,'jdk/internal/platform/CgroupUtil$$Lambda.0x00007f2d8c3f9100.run')
+f(96,6,4,1,'jdk/internal/platform/CgroupUtil.lambda$readStringValue$1')
+f(97,6,4,1,'java/nio/file/Files.newBufferedReader')
+f(98,6,4,1,'java/nio/file/Files.newBufferedReader')
+f(99,6,2,1,'java/io/BufferedReader.<init>')
+f(100,6,2,1,'java/io/BufferedReader.<init>')
+f(101,6,2,5,'char[]')
+f(99,8,2,1,'java/io/InputStreamReader.<init>')
+f(100,8,2,1,'sun/nio/cs/StreamDecoder.forInputStreamReader')
+f(101,8,2,1,'sun/nio/cs/StreamDecoder.<init>')
+f(102,8,2,1,'java/nio/ByteBuffer.allocate')
+f(103,8,2,5,'byte[]')
+f(76,10,9,1,'io/micrometer/core/instrument/binder/system/ProcessorMetrics$$Lambda.0x00007f2d8c4be000.applyAsDouble')
+f(77,10,9,1,'io/micrometer/core/instrument/binder/system/ProcessorMetrics.lambda$bindTo$1')
+f(78,10,9,1,'io/micrometer/core/instrument/binder/system/ProcessorMetrics.invoke')
+f(79,10,9,1,'java/lang/reflect/Method.invoke')
+f(80,10,9,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invoke')
+f(81,10,9,1,'jdk/internal/reflect/DirectMethodHandleAccessor.invokeImpl')
+f(82,10,9,1,'java/lang/invoke/Invokers$Holder.invokeExact_MT')
+f(83,10,9,1,'java/lang/invoke/LambdaForm$MH.0x00007f2d8c540800.invoke')
+f(84,10,9,1,'java/lang/invoke/LambdaForm$DMH.0x00007f2d8c4bc800.invokeInterface')
+f(85,10,9,1,'com/sun/management/internal/OperatingSystemImpl.getProcessCpuLoad')
+f(86,10,9,1,'com/sun/management/internal/OperatingSystemImpl$ContainerCpuTicks.getContainerCpuLoad')
+f(87,10,7,1,'com/sun/management/internal/OperatingSystemImpl.isCpuSetSameAsHostCpuSet')
+f(88,10,7,1,'jdk/internal/platform/CgroupMetrics.getCpuSetCpus')
+f(89,10,7,1,'jdk/internal/platform/cgroupv1/CgroupV1Subsystem.getCpuSetCpus')
+f(90,10,7,1,'jdk/internal/platform/CgroupSubsystemController.getStringValue')
+f(91,10,7,1,'jdk/internal/platform/CgroupUtil.readStringValue')
+f(92,10,7,1,'java/security/AccessController.doPrivileged')
+f(93,10,7,1,'java/security/AccessController.executePrivileged')
+f(94,10,7,1,'jdk/internal/platform/CgroupUtil$$Lambda.0x00007f2d8c3f9100.run')
+f(95,10,7,1,'jdk/internal/platform/CgroupUtil.lambda$readStringValue$1')
+f(96,10,7,1,'java/nio/file/Files.newBufferedReader')
+f(97,10,7,1,'java/nio/file/Files.newBufferedReader')
+f(98,10,3,1,'java/io/BufferedReader.<init>')
+f(99,10,3,1,'java/io/BufferedReader.<init>')
+f(100,10,1,2,'char[]')
+f(100,11,2,5,'char[]')
+f(98,13,4,1,'java/io/InputStreamReader.<init>')
+f(99,13,4,1,'sun/nio/cs/StreamDecoder.forInputStreamReader')
+f(100,13,4,1,'sun/nio/cs/StreamDecoder.<init>')
+f(101,13,4,1,'java/nio/ByteBuffer.allocate')
+f(102,13,1,2,'byte[]')
+f(102,14,3,5,'byte[]')
+f(87,17,2,1,'jdk/internal/platform/CgroupMetrics.getCpuShares')
+f(88,17,2,1,'jdk/internal/platform/cgroupv1/CgroupV1Subsystem.getCpuShares')
+f(89,17,2,1,'jdk/internal/platform/cgroupv1/CgroupV1Subsystem.getLongValue')
+f(90,17,2,1,'jdk/internal/platform/CgroupSubsystemController.getLongValue')
+f(91,17,2,1,'jdk/internal/platform/CgroupSubsystemController.getStringValue')
+f(92,17,2,1,'jdk/internal/platform/CgroupUtil.readStringValue')
+f(93,17,2,1,'java/security/AccessController.doPrivileged')
+f(94,17,2,1,'java/security/AccessController.executePrivileged')
+f(95,17,2,1,'jdk/internal/platform/CgroupUtil$$Lambda.0x00007f2d8c3f9100.run')
+f(96,17,2,1,'jdk/internal/platform/CgroupUtil.lambda$readStringValue$1')
+f(97,17,2,1,'java/nio/file/Files.newBufferedReader')
+f(98,17,2,1,'java/nio/file/Files.newBufferedReader')
+f(99,17,1,1,'java/io/BufferedReader.<init>')
+f(100,17,1,1,'java/io/BufferedReader.<init>')
+f(101,17,1,5,'char[]')
+f(99,18,1,1,'java/io/InputStreamReader.<init>')
+f(100,18,1,1,'sun/nio/cs/StreamDecoder.forInputStreamReader')
+f(101,18,1,1,'sun/nio/cs/StreamDecoder.<init>')
+f(102,18,1,1,'java/nio/ByteBuffer.allocate')
+f(103,18,1,5,'byte[]')
+f(75,19,1,1,'io/prometheus/metrics/model/snapshots/Labels.of')
+f(76,19,1,1,'io/prometheus/metrics/model/snapshots/Labels.sortAndValidate')
+f(77,19,1,1,'io/prometheus/metrics/model/snapshots/Labels.validateNames')
+f(78,19,1,1,'io/prometheus/metrics/model/snapshots/PrometheusNaming.isValidLabelName')
+f(79,19,1,1,'java/util/regex/Pattern.matcher')
+f(80,19,1,1,'java/util/regex/Matcher.<init>')
+f(81,19,1,2,'int[]')
+f(73,20,1,1,'java/util/stream/ReferencePipeline.collect')
+f(74,20,1,1,'java/util/stream/AbstractPipeline.evaluate')
+f(75,20,1,1,'java/util/stream/ReduceOps$ReduceOp.evaluateSequential')
+f(76,20,1,1,'java/util/stream/AbstractPipeline.wrapAndCopyInto')
+f(77,20,1,1,'java/util/stream/AbstractPipeline.copyInto')
+f(78,20,1,1,'java/util/stream/Sink$ChainedReference.begin')
+f(79,20,1,1,'java/util/stream/ReduceOps$3ReducingSink.begin')
+f(80,20,1,1,'java/util/stream/Collectors$$Lambda.0x00007f2d8c3e72a8.get')
+f(81,20,1,1,'java/util/ArrayList.<init>')
+f(82,20,1,2,'java.util.ArrayList')
+f(73,21,1,1,'java/util/stream/ReferencePipeline.map')
+f(74,21,1,1,'java/util/stream/ReferencePipeline$3.<init>')
+f(75,21,1,2,'java.util.stream.ReferencePipeline$3')
+f(70,22,1,1,'java/io/ByteArrayOutputStream.<init>')
+f(71,22,1,5,'byte[]')
+f(70,23,1,1,'java/io/ByteArrayOutputStream.toByteArray')
+f(71,23,1,1,'java/util/Arrays.copyOf')
+f(72,23,1,5,'byte[]')
+f(70,24,14,1,'org/springframework/boot/actuate/metrics/export/prometheus/PrometheusOutputFormat$2.write')
+f(71,24,14,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.write')
+f(72,24,5,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeCounter')
+f(73,24,3,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeMetadata')
+f(74,24,2,1,'io/prometheus/metrics/expositionformats/TextFormatUtil.writeEscapedLabelValue')
+f(75,24,2,1,'java/io/Writer.append')
+f(76,24,2,1,'java/io/OutputStreamWriter.write')
+f(77,24,2,1,'sun/nio/cs/StreamEncoder.write')
+f(78,24,2,2,'char[]')
+f(74,26,1,1,'java/io/Writer.write')
+f(75,26,1,1,'java/io/OutputStreamWriter.write')
+f(76,26,1,1,'sun/nio/cs/StreamEncoder.write')
+f(77,26,1,1,'sun/nio/cs/StreamEncoder.write')
+f(78,26,1,1,'sun/nio/cs/StreamEncoder.lockedWrite')
+f(79,26,1,1,'sun/nio/cs/StreamEncoder.implWrite')
+f(80,26,1,1,'java/nio/CharBuffer.wrap')
+f(81,26,1,2,'java.nio.HeapCharBuffer')
+f(73,27,1,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeScrapeTimestampAndExemplar')
+f(74,27,1,1,'java/io/OutputStreamWriter.write')
+f(75,27,1,1,'sun/nio/cs/StreamEncoder.write')
+f(76,27,1,1,'sun/nio/cs/StreamEncoder.write')
+f(77,27,1,1,'sun/nio/cs/StreamEncoder.lockedWrite')
+f(78,27,1,1,'sun/nio/cs/StreamEncoder.implWrite')
+f(79,27,1,1,'java/nio/CharBuffer.wrap')
+f(80,27,1,2,'java.nio.HeapCharBuffer')
+f(73,28,1,1,'io/prometheus/metrics/expositionformats/TextFormatUtil.writeDouble')
+f(74,28,1,1,'java/io/Writer.write')
+f(75,28,1,1,'java/io/OutputStreamWriter.write')
+f(76,28,1,1,'sun/nio/cs/StreamEncoder.write')
+f(77,28,1,1,'sun/nio/cs/StreamEncoder.write')
+f(78,28,1,1,'sun/nio/cs/StreamEncoder.lockedWrite')
+f(79,28,1,1,'sun/nio/cs/StreamEncoder.implWrite')
+f(80,28,1,1,'java/nio/CharBuffer.wrap')
+f(81,28,1,2,'java.nio.HeapCharBuffer')
+f(72,29,8,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeGauge')
+f(73,29,6,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeMetadata')
+f(74,29,4,1,'io/prometheus/metrics/expositionformats/TextFormatUtil.writeEscapedLabelValue')
+f(75,29,4,1,'java/io/Writer.append')
+f(76,29,4,1,'java/io/OutputStreamWriter.write')
+f(77,29,4,1,'sun/nio/cs/StreamEncoder.write')
+f(78,29,2,2,'char[]')
+f(78,31,2,1,'sun/nio/cs/StreamEncoder.write')
+f(79,31,2,1,'sun/nio/cs/StreamEncoder.lockedWrite')
+f(80,31,2,1,'sun/nio/cs/StreamEncoder.implWrite')
+f(81,31,2,1,'java/nio/CharBuffer.wrap')
+f(82,31,2,2,'java.nio.HeapCharBuffer')
+f(74,33,1,1,'java/io/OutputStreamWriter.write')
+f(75,33,1,1,'sun/nio/cs/StreamEncoder.write')
+f(76,33,1,2,'char[]')
+f(74,34,1,1,'java/io/Writer.write')
+f(75,34,1,1,'java/io/OutputStreamWriter.write')
+f(76,34,1,1,'sun/nio/cs/StreamEncoder.write')
+f(77,34,1,2,'char[]')
+f(73,35,2,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeNameAndLabels')
+f(74,35,2,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeNameAndLabels')
+f(75,35,2,1,'io/prometheus/metrics/expositionformats/TextFormatUtil.writeLabels')
+f(76,35,1,1,'io/prometheus/metrics/expositionformats/TextFormatUtil.writeEscapedLabelValue')
+f(77,35,1,1,'java/io/Writer.append')
+f(78,35,1,1,'java/io/OutputStreamWriter.write')
+f(79,35,1,1,'sun/nio/cs/StreamEncoder.write')
+f(80,35,1,2,'char[]')
+f(76,36,1,1,'java/io/Writer.write')
+f(77,36,1,1,'java/io/OutputStreamWriter.write')
+f(78,36,1,1,'sun/nio/cs/StreamEncoder.write')
+f(79,36,1,2,'char[]')
+f(72,37,1,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeSummary')
+f(73,37,1,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeCountAndSum')
+f(74,37,1,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeNameAndLabels')
+f(75,37,1,1,'io/prometheus/metrics/expositionformats/OpenMetricsTextFormatWriter.writeNameAndLabels')
+f(76,37,1,1,'io/prometheus/metrics/expositionformats/TextFormatUtil.writeLabels')
+f(77,37,1,1,'io/prometheus/metrics/expositionformats/TextFormatUtil.writeEscapedLabelValue')
+f(78,37,1,1,'java/io/Writer.append')
+f(79,37,1,1,'java/io/OutputStreamWriter.write')
+f(80,37,1,1,'sun/nio/cs/StreamEncoder.write')
+f(81,37,1,1,'sun/nio/cs/StreamEncoder.write')
+f(82,37,1,1,'sun/nio/cs/StreamEncoder.lockedWrite')
+f(83,37,1,1,'sun/nio/cs/StreamEncoder.implWrite')
+f(84,37,1,1,'java/nio/CharBuffer.wrap')
+f(85,37,1,2,'java.nio.HeapCharBuffer')
+
+search();
+</script></body></html>
