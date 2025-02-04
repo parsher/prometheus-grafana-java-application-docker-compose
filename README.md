@@ -60,9 +60,3 @@ chmod +x async-profiler.sh
 Set-ExecutionPolicy RemoteSigned
 .\async-profiler.ps1
 ```
-
-## Java application profiling with kubectl-prof
-
-```bash
-kubectl prof <pod-name> -t 5m -l java -o flamegraph --local-path=/tmp
-```
