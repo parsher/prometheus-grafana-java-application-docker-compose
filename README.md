@@ -1,4 +1,6 @@
-
+# ENV
+JDK v21
+Node v22
 
 # Build & up
 ```bash

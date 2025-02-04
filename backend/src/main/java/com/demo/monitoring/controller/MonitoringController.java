@@ -19,6 +19,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 @RestController
 @RequestMapping("/monitor")
 public class MonitoringController {
+    private static final int MAX_MEMORY_LEAK_MB = 500; // 최대 500MB까지만 허용
     private static List<byte[]> memoryHog = new ArrayList<>();
     private static ExecutorService executorService = Executors.newFixedThreadPool(100);
 
@@ -36,15 +37,26 @@ public class MonitoringController {
         return "Generating high CPU load...";
     }
 
+
     @Operation(summary = "Trigger memory leak", description = "This endpoint triggers a memory leak for monitoring purposes")
     @ApiResponse(responseCode = "200", description = "Memory leak triggered successfully")
+    @ApiResponse(responseCode = "500", description = "Memory allocation failed")
     @GetMapping("/memory-leak")
     public String memoryLeakEndpoint() {
-        for (int i = 0; i < 1000; i++) {
-            memoryHog.add(new byte[1024 * 1024]); // Add 1MB each call
+        try {
+            if (memoryHog.size() < MAX_MEMORY_LEAK_MB) {
+                for (int i = 0; i < 10; i++) { // 10MB씩 추가
+                    memoryHog.add(new byte[1024 * 1024]);
+                }
+                return "Memory leak triggered: " + memoryHog.size() + " MB allocated";
+            } else {
+                return "Maximum memory leak limit reached: " + MAX_MEMORY_LEAK_MB + " MB";
+            }
+        } catch (OutOfMemoryError e) {
+            return "Failed to allocate memory: " + e.getMessage();
         }
-        return "Memory leak triggered: " + memoryHog.size() + " MB allocated";
     }
+    
 
     @Operation(summary = "Increase thread count", description = "This endpoint increases the thread count for monitoring purposes")
     @ApiResponse(responseCode = "200", description = "Thread count increased successfully")
